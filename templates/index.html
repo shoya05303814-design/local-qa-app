@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>ローカルAI質問アプリ</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-100">
+    <div class="max-w-xl mx-auto mt-10 bg-white shadow-md rounded p-6">
+        <h1 class="text-2xl font-bold mb-4">ローカルAI 質問アプリ</h1>
+
+        <!-- 質問フォーム -->
+        <form id="ask-form" class="flex gap-2">
+            <input
+                id="question"
+                type="text"
+                placeholder="質問を入力..."
+                class="flex-1 p-2 border rounded"
+            />
+
+            <!-- モデル選択ドロップダウンを追加 -->
+            <select id="model" class="p-2 border rounded">
+                <option value="">自動選択</option>
+                <option value="impira/layoutlm-document-qa">日本語モデル</option>
+                <option value="distilbert/distilbert-base-cased-distilled-squad">英語モデル</option>
+            </select>
+            
+            <button
+                type="submit"
+                class="bg-blue-500 text-white px-4 py-2 rounded"
+            >送信</button>
+        </form>
+
+        <!-- 回答表示 -->
+        <div id="answer-box" class="mt-4 p-3 bg-gray-200 rounded hidden"></div>
+
+        <!-- 履歴タイトル -->
+        <h2 class="text-xl font-bold mt-8 mb-2">質問履歴</h2>
+
+        <!-- 履歴を表示する領域 -->
+        <div id="history-box" class="space-y-3"></div>
+    </div>
+
+    <!-- JavaScript（API連携＋履歴表示） -->
+    <script>
+    // 履歴送信
+    document.getElementById("ask-form").addEventListener("submit", async (e) => {
+        e.preventDefault();
+
+        const question = document.getElementById("question").value;
+        const model = document.getElementById("model").value;
+
+        const res = await fetch("/ask", {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({
+                question: question,
+                context: "",
+                model: model // モデルをAPIに送信
+            })
+        });
+
+        const data = await res.json();
+
+        const box = document.getElementById("answer-box");
+        box.classList.remove("hidden");
+
+        box.innerHTML = `
+            <p class="font-bold">回答：</p>
+            <p>${data.answer}</p>
+            <p class="text-sm text-gray-600 mt-2">${data.confidence}</p>
+            <p class="text-xs text-gray-500 mt-1">使用モデル：${model || "自動判定"}</p>
+        `;
+
+        // 回答したら履歴を更新
+        loadHistory();
+    });
+
+    // 履歴読み込み
+    async function loadHistory(){
+        const res = await fetch("/history");
+        const history = await res.json();
+
+        const box = document.getElementById("history-box");
+        box.innerHTML = "";
+
+        history.forEach(item => {
+            const div = document.createElement("div");
+            div.className = "p-3 border rounded bg-gray-50";
+
+            div.innerHTML = `
+                <p><strong>質問：</strong> ${item.question}</p>
+                <p><strong>回答：</strong> ${item.answer}</p>
+                <p class="text-xs text-gray-500 mt-1">${item.created_at}</p>
+            `;
+
+            box.appendChild(div);
+        });
+    }
+
+    // ページ読み込み時に履歴表示
+    window.onload = loadHistory;
+    </script>
+</body>
+</html>

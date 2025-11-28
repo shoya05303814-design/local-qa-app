@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <title>ローカル質問アプリ</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        #history { margin-top: 20px; padding: 10px; border: 1px solid #ccc; }
+        .item { margin-bottom: 10px; padding: 5px; border-bottom: 1px solid #ddd; }
+        .question { font-weight: bold; }
+        .answer { margin-left: 10px; }
+        #answer-box { margin-top: 20px; padding: 10px; border: 1px solid #666; background: #f9f9f9; }
+    </style>
+</head>
+<body>
+
+<h2>ローカル質問アプリ</h2>
+
+<!-- 入力フォーム -->
+<textarea id="question-input" rows="4" cols="50" placeholder="質問を入力してください"></textarea>
+<br>
+<button id="send-btn">送信</button>
+
+<h3>回答</h3>
+<div id="answer-box">ここに回答が表示されます</div>
+
+<h3>履歴</h3>
+<div id="history">読み込み中...</div>
+
+<script>
+// ---- /ask API へ送信 ----
+async function sendQuestion() {
+    const q = document.getElementById("question-input").value;
+    if (!q.trim()) return;
+
+    const res = await fetch("/ask", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ question: q })
+    });
+
+    const data = await res.json();
+
+    document.getElementById("answer-box").textContent = data.answer;
+
+    // 履歴を再読み込み
+    loadHistory();
+}
+
+// ---- 履歴を読み込み ----
+async function loadHistory() {
+    const res = await fetch("/history");
+    const items = await res.json();
+
+    const historyDiv = document.getElementById("history");
+    historyDiv.innerHTML = "";
+
+    items.forEach(item => {
+        const div = document.createElement("div");
+        div.className = "item";
+        div.innerHTML = `
+            <div class="question">Q: ${item.question}</div>
+            <div class="answer">A: ${item.answer}</div>
+        `;
+        historyDiv.appendChild(div);
+    });
+}
+
+// ---- ボタンにイベントを設定 ----
+document.getElementById("send-btn").addEventListener("click", sendQuestion);
+
+// ---- ページ読み込み時に履歴取得 ----
+loadHistory();
+</script>
+
+</body>
+</html>
