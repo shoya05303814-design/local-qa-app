@@ -1,39 +1,42 @@
 import os
+import json
+import numpy as np
+import onnxruntime as ort
 from fastapi import FastAPI
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 from sqlalchemy.orm import Session
-from transformers import pipeline
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 
 from database import SessionLocal, Base, engine, QAHistory
 import logging
+from transformers import AutoTokenizer  # tokenizer は軽いので OK
 
-# ロガー設定
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s"
-)
+# -----------------------------------
+# Logging
+# -----------------------------------
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ==============================
-#  .env 読み込み
-# ==============================
+# -----------------------------------
+# Load Env
+# -----------------------------------
 load_dotenv()
 
-DEFAULT_MODEL = os.getenv("DEFAULT_MODEL") # 英語モデル
-JA_MODEL = os.getenv("JA_MODEL")           # 日本語モデル
+DEFAULT_MODEL = os.getenv("DEFAULT_MODEL")  # 英語モデル（例：distilbert-base-cased-distilled-squad）
+JA_MODEL = os.getenv("JA_MODEL")            # 日本語モデル（例：cl-tohoku/bert-base-japanese-whole-word-masking）
 
-# DB初期化
+# -----------------------------------
+# DB init
+# -----------------------------------
 Base.metadata.create_all(bind=engine)
 
-# ==============================================================================
-# FastAPI初期化
-# ==============================================================================
+# -----------------------------------
+# FastAPI init
+# -----------------------------------
 app = FastAPI()
-
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -42,84 +45,112 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ==============================
-# モデル読み込み（自動読み込み）
-# ==============================
-print("Loading English model:", DEFAULT_MODEL)
-qa_en = pipeline("question-answering", model=DEFAULT_MODEL)
+# -----------------------------------
+# Helper：ONNX モデルをロードして QA を実行するクラス
+# -----------------------------------
+class ONNXPipeline:
+    def __init__(self, model_name):
+        # ONNX モデルファイルパス（例：models/distilbert-base.onnx）
+        model_path = f"models/{model_name}.onnx"
 
-print("Loading Japanese model:", JA_MODEL)
-qa_ja = pipeline("question-answering", model=JA_MODEL)
+        # tokenizer は transformers で問題なし（軽量）
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
 
-# ==============================
-# API 入出力モデル
-# ==============================
+        # ONNX Runtime セッション
+        self.session = ort.InferenceSession(model_path, providers=["CPUExecutionProvider"])
+
+    def __call__(self, question, context):
+        inputs = self.tokenizer(question, context, return_tensors="np")
+
+        # モデル実行
+        outputs = self.session.run(
+            None,
+            {
+                "input_ids": inputs["input_ids"],
+                "attention_mask": inputs["attention_mask"],
+            }
+        )
+
+        start_logits, end_logits = outputs
+
+        # 予測スコアから answer を抽出
+        start = int(np.argmax(start_logits))
+        end = int(np.argmax(end_logits)) + 1
+
+        tokens = inputs["input_ids"][0][start:end]
+        answer = self.tokenizer.decode(tokens, skip_special_tokens=True)
+
+        score = float(
+            np.max(start_logits) + np.max(end_logits)
+        )  # 簡易スコア
+
+        return {"answer": answer, "score": score}
+
+# -----------------------------------
+# Load ONNX models
+# -----------------------------------
+logger.info("Loading English ONNX model...")
+qa_en = ONNXPipeline(DEFAULT_MODEL)
+
+logger.info("Loading Japanese ONNX model...")
+qa_ja = ONNXPipeline(JA_MODEL)
+
+# -----------------------------------
+# Request schema
+# -----------------------------------
 class AskRequest(BaseModel):
     question: str
     context: str = ""
-    model: str = "" # フロントから選択されたモデル名を受け取る
+    model: str = ""
 
-# ---------------------
-# /ask 質問処理
-# ---------------------
+
+# -----------------------------------
+# /ask
+# -----------------------------------
 @app.post("/ask")
 def ask_question(req: AskRequest):
-    logger.info(f"Received question: {req.question}")
 
     # モデル選択
-    try:
-        if req.model:
-            selected_model = req.model
-        elif any(c in req.question for c in "あいうえおかきくけこさしすせそたちつてとなにぬねのはひふへほまみむめもやゆよわをん"):
-            selected_model = JA_MODEL
-        else:
-            selected_model = DEFAULT_MODEL
+    if req.model:
+        selected_model = req.model
+    elif any(c in req.question for c in "あいうえおかきくけこさしすせそたちつてとなにぬねのはひふへほまみむめもやゆよわをん"):
+        selected_model = JA_MODEL
+    else:
+        selected_model = DEFAULT_MODEL
 
-        qa_pipeline = qa_ja if selected_model == JA_MODEL else qa_en
+    qa_pipeline = qa_ja if selected_model == JA_MODEL else qa_en
 
-    except Exception as e:
-        logger.error(f"Model selection error: {str(e)}")
-        return {"error": "Model selection failed"}
+    # 推論
+    result = qa_pipeline(req.question, req.context or " ")
 
-    # 推論処理
-    try:
-        result = qa_pipeline(
-            question=req.question,
-            context=req.context or " "
-        )
-    except Exception as e:
-        logger.error(f"Inference failed: {str(e)}")
-        return {"error": "Model failed to answer"}
-
-    # DB 保存
+    # DB保存
     try:
         db: Session = SessionLocal()
         history = QAHistory(
             question=req.question,
-            answer=result.get("answer"),
-            confidence=f"score={result.get('score'):.3f}",
+            answer=result["answer"],
+            confidence=f"score={result['score']:.3f}",
         )
         db.add(history)
         db.commit()
     except Exception as e:
-        logger.error(f"DB insert error: {str(e)}")
-
-    logger.info("Answer generated successfully.")
+        logger.error(f"DB insert failed: {e}")
 
     return {
-        "answer": result.get("answer"),
-        "confidence": f"score={result.get('score'):.3f}",
+        "answer": result["answer"],
+        "confidence": f"score={result['score']:.3f}",
         "model_used": selected_model,
     }
 
-# ---------------------
-# /history 履歴取得
-# ---------------------
+
+# -----------------------------------
+# /history
+# -----------------------------------
 @app.get("/history")
 def get_history():
     db: Session = SessionLocal()
     items = db.query(QAHistory).order_by(QAHistory.id.desc()).all()
-    
+
     return [
         {
             "id": item.id,
@@ -128,9 +159,12 @@ def get_history():
             "created_at": item.created_at,
         }
         for item in items
-    ] 
+    ]
 
-# --- index.html を返す設定 ---
+
+# -----------------------------------
+# Static files + index
+# -----------------------------------
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 @app.get("/")
