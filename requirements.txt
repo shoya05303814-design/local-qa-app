@@ -4,3 +4,4 @@ pydantic
 python-dotenv
 SQLAlchemy
 transformers
+torch==2.1.0
